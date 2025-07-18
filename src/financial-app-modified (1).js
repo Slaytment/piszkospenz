@@ -2147,97 +2147,6 @@ const FinancialApp = () => {
         </div>
       )}
 
-      {/* Sort Cart Item Modal */}
-      {sortingCartItem && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold mb-4">Sort Cart Item: {sortingCartItem.item.name}</h3>
-            <p className="text-sm text-gray-600 mb-4">Price: {formatCurrency(sortingCartItem.item.price)}</p>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Primary Category
-                </label>
-                <select
-                  value={sortingCartItem.item.primaryCategory || ''}
-                  onChange={(e) => setSortingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, primaryCategory: e.target.value }
-                  }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Select category</option>
-                  {categories.map(category => (
-                    <option key={category} value={category}>
-                      {category}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Category Match (%)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="100"
-                  value={sortingCartItem.item.categoryMatch || '100'}
-                  onChange={(e) => setSortingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, categoryMatch: e.target.value }
-                  }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Secondary Category ({calculateSecondaryPercentage(sortingCartItem.item.categoryMatch || '100')}%)
-                </label>
-                <select
-                  value={sortingCartItem.item.secondaryCategory || ''}
-                  onChange={(e) => setSortingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, secondaryCategory: e.target.value }
-                  }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">None</option>
-                  {categories.filter(cat => cat !== sortingCartItem.item.primaryCategory).map(category => (
-                    <option key={category} value={category}>
-                      {category}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            
-            <div className="flex gap-2 mt-6">
-              <button
-                onClick={() => saveSortedCartItem(sortingCartItem.cartId, sortingCartItem.item, {
-                  primaryCategory: sortingCartItem.item.primaryCategory,
-                  categoryMatch: sortingCartItem.item.categoryMatch || '100',
-                  secondaryCategory: sortingCartItem.item.secondaryCategory || ''
-                })}
-                disabled={!sortingCartItem.item.primaryCategory}
-                className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-300"
-              >
-                Sort Item
-              </button>
-              <button
-                onClick={() => setSortingCartItem(null)}
-                className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Edit Modal */}
       {editingItem && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -2469,3 +2378,94 @@ const App = () => {
 };
 
 export default App;
+          </div>
+        </div>
+      )}
+
+      {/* Sort Cart Item Modal */}
+      {sortingCartItem && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-lg font-semibold mb-4">Sort Cart Item: {sortingCartItem.item.name}</h3>
+            <p className="text-sm text-gray-600 mb-4">Price: {formatCurrency(sortingCartItem.item.price)}</p>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Primary Category
+                </label>
+                <select
+                  value={sortingCartItem.item.primaryCategory || ''}
+                  onChange={(e) => setSortingCartItem(prev => ({
+                    ...prev,
+                    item: { ...prev.item, primaryCategory: e.target.value }
+                  }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select category</option>
+                  {categories.map(category => (
+                    <option key={category} value={category}>
+                      {category}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Category Match (%)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={sortingCartItem.item.categoryMatch || '100'}
+                  onChange={(e) => setSortingCartItem(prev => ({
+                    ...prev,
+                    item: { ...prev.item, categoryMatch: e.target.value }
+                  }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Secondary Category ({calculateSecondaryPercentage(sortingCartItem.item.categoryMatch || '100')}%)
+                </label>
+                <select
+                  value={sortingCartItem.item.secondaryCategory || ''}
+                  onChange={(e) => setSortingCartItem(prev => ({
+                    ...prev,
+                    item: { ...prev.item, secondaryCategory: e.target.value }
+                  }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">None</option>
+                  {categories.filter(cat => cat !== sortingCartItem.item.primaryCategory).map(category => (
+                    <option key={category} value={category}>
+                      {category}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            
+            <div className="flex gap-2 mt-6">
+              <button
+                onClick={() => saveSortedCartItem(sortingCartItem.cartId, sortingCartItem.item, {
+                  primaryCategory: sortingCartItem.item.primaryCategory,
+                  categoryMatch: sortingCartItem.item.categoryMatch || '100',
+                  secondaryCategory: sortingCartItem.item.secondaryCategory || ''
+                })}
+                disabled={!sortingCartItem.item.primaryCategory}
+                className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-300"
+              >
+                Sort Item
+              </button>
+              <button
+                onClick={() => setSortingCartItem(null)}
+                className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
+              >
+                Cancel
+              </button>
+            </div>
