@@ -1,0 +1,2 @@
+git remote add origin https://github.com/Slaytment/Clubhouse
+git push -u origin main

@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { Plus, Edit2, Trash2, Calendar, Filter, ArrowRight, Settings, Download, LogOut, ShoppingCart, X, Package } from 'lucide-react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { Plus, Edit2, Trash2, Calendar, Filter, ArrowRight, Settings, Download, LogOut, ShoppingCart, X, Package, Camera, Upload } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -22,6 +22,9 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 
+// Import Tesseract
+import Tesseract from 'tesseract.js';
+
 // Firebase configuration - Replace with your own config
 const firebaseConfig = {
   apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
@@ -42,6 +45,430 @@ const capitalizeFirstLetter = (string) => {
   if (!string) return '';
   return string.charAt(0).toUpperCase() + string.slice(1);
 };
+
+// Receipt Scanner Component
+const ReceiptScanner = React.memo(({ onClose, onProcessReceipt, formatCurrency }) => {
+  const [image, setImage] = useState(null);
+  const [processing, setProcessing] = useState(false);
+  const [ocrResult, setOcrResult] = useState(null);
+  const [editedData, setEditedData] = useState({
+    storeName: '',
+    date: new Date().toISOString().split('T')[0],
+    items: [],
+    total: ''
+  });
+  const fileInputRef = useRef();
+  const videoRef = useRef();
+  const canvasRef = useRef();
+  const [cameraActive, setCameraActive] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+
+  // Start camera
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'environment' } 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setCameraActive(true);
+      }
+    } catch (err) {
+      console.error('Camera access error:', err);
+      alert('Unable to access camera. Please use file upload instead.');
+    }
+  };
+
+  // Stop camera
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
+      setCameraActive(false);
+    }
+  };
+
+  // Capture photo from camera
+  const capturePhoto = () => {
+    if (videoRef.current && canvasRef.current) {
+      const context = canvasRef.current.getContext('2d');
+      canvasRef.current.width = videoRef.current.videoWidth;
+      canvasRef.current.height = videoRef.current.videoHeight;
+      context.drawImage(videoRef.current, 0, 0);
+      
+      canvasRef.current.toBlob((blob) => {
+        const file = new File([blob], 'receipt.jpg', { type: 'image/jpeg' });
+        handleImageSelect({ target: { files: [file] } });
+        stopCamera();
+      });
+    }
+  };
+
+  // Handle image selection
+  const handleImageSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        setImage(e.target.result);
+        processImage(e.target.result);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Process image with OCR
+  const processImage = async (imageData) => {
+    setProcessing(true);
+    setScanProgress(0);
+    
+    try {
+      const result = await Tesseract.recognize(
+        imageData,
+        'hun+eng', // Hungarian + English
+        {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              setScanProgress(Math.round(m.progress * 100));
+            }
+          }
+        }
+      );
+      
+      const text = result.data.text;
+      const parsedData = parseReceipt(text);
+      setOcrResult(text);
+      setEditedData(parsedData);
+    } catch (error) {
+      console.error('OCR Error:', error);
+      alert('Failed to process receipt. Please try again.');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  // Parse receipt text
+  const parseReceipt = (text) => {
+    const lines = text.split('\n').filter(line => line.trim());
+    const data = {
+      storeName: '',
+      date: new Date().toISOString().split('T')[0],
+      items: [],
+      total: ''
+    };
+
+    // Try to detect store name (usually in first few lines)
+    const storePatterns = [
+      /ALDI/i,
+      /LIDL/i,
+      /TESCO/i,
+      /SPAR/i,
+      /PENNY/i,
+      /CBA/i,
+      /COOP/i
+    ];
+    
+    for (let i = 0; i < Math.min(5, lines.length); i++) {
+      for (const pattern of storePatterns) {
+        if (pattern.test(lines[i])) {
+          data.storeName = lines[i].trim();
+          break;
+        }
+      }
+      if (data.storeName) break;
+    }
+
+    // Try to find date (common formats: 2024.12.19, 2024-12-19, 2024/12/19)
+    const datePattern = /(\d{4})[.\-/](\d{2})[.\-/](\d{2})/;
+    for (const line of lines) {
+      const dateMatch = line.match(datePattern);
+      if (dateMatch) {
+        data.date = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+        break;
+      }
+    }
+
+    // Parse items and prices
+    const pricePattern = /(\d+[\s,]?\d*)\s*(Ft|HUF|-)?$/i;
+    const totalPatterns = [
+      /ÖSSZESEN|ÖSSZ|TOTAL|VÉGÖSSZEG|FIZETENDŐ/i,
+      /KÉSZPÉNZ|BANKKÁRTYA|KÁRTYA/i
+    ];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      
+      // Check if this is a total line
+      const isTotal = totalPatterns.some(pattern => pattern.test(line));
+      
+      const priceMatch = line.match(pricePattern);
+      if (priceMatch) {
+        const price = priceMatch[1].replace(/[\s,]/g, '');
+        
+        if (isTotal && !data.total) {
+          data.total = price;
+        } else if (!isTotal) {
+          // Extract item name (everything before the price)
+          const itemName = line.substring(0, line.indexOf(priceMatch[0])).trim();
+          if (itemName && itemName.length > 2) {
+            data.items.push({
+              name: itemName,
+              price: parseFloat(price)
+            });
+          }
+        }
+      }
+    }
+
+    // If no total found, calculate from items
+    if (!data.total && data.items.length > 0) {
+      const calculatedTotal = data.items.reduce((sum, item) => sum + item.price, 0);
+      data.total = calculatedTotal.toString();
+    }
+
+    return data;
+  };
+
+  // Handle manual edits
+  const handleEditChange = (field, value) => {
+    setEditedData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleItemChange = (index, field, value) => {
+    setEditedData(prev => ({
+      ...prev,
+      items: prev.items.map((item, i) => 
+        i === index ? { ...item, [field]: value } : item
+      )
+    }));
+  };
+
+  const addItem = () => {
+    setEditedData(prev => ({
+      ...prev,
+      items: [...prev.items, { name: '', price: 0 }]
+    }));
+  };
+
+  const removeItem = (index) => {
+    setEditedData(prev => ({
+      ...prev,
+      items: prev.items.filter((_, i) => i !== index)
+    }));
+  };
+
+  // Process the receipt data
+  const processReceipt = () => {
+    if (editedData.items.length === 0) {
+      alert('Please add at least one item');
+      return;
+    }
+
+    onProcessReceipt(editedData);
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopCamera();
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+      <div className="bg-white rounded-lg p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-xl font-semibold flex items-center gap-2">
+            <Camera size={24} />
+            Scan Receipt
+          </h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+            <X size={24} />
+          </button>
+        </div>
+
+        {!image && !cameraActive && (
+          <div className="space-y-4">
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={startCamera}
+                className="bg-blue-500 text-white px-6 py-3 rounded-lg hover:bg-blue-600 flex items-center gap-2"
+              >
+                <Camera size={20} />
+                Take Photo
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="bg-green-500 text-white px-6 py-3 rounded-lg hover:bg-green-600 flex items-center gap-2"
+              >
+                <Upload size={20} />
+                Upload Image
+              </button>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleImageSelect}
+              className="hidden"
+            />
+          </div>
+        )}
+
+        {cameraActive && (
+          <div className="space-y-4">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              className="w-full rounded-lg"
+            />
+            <canvas ref={canvasRef} className="hidden" />
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={capturePhoto}
+                className="bg-blue-500 text-white px-6 py-3 rounded-lg hover:bg-blue-600"
+              >
+                Capture
+              </button>
+              <button
+                onClick={stopCamera}
+                className="bg-gray-500 text-white px-6 py-3 rounded-lg hover:bg-gray-600"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {image && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <h4 className="font-medium mb-2">Receipt Image</h4>
+              <img src={image} alt="Receipt" className="w-full rounded-lg" />
+            </div>
+
+            <div className="space-y-4">
+              {processing ? (
+                <div className="text-center py-8">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                  <p>Processing receipt... {scanProgress}%</p>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Store Name
+                    </label>
+                    <input
+                      type="text"
+                      value={editedData.storeName}
+                      onChange={(e) => handleEditChange('storeName', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="e.g., Aldi"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Date
+                    </label>
+                    <input
+                      type="date"
+                      value={editedData.date}
+                      onChange={(e) => handleEditChange('date', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Total
+                    </label>
+                    <input
+                      type="number"
+                      value={editedData.total}
+                      onChange={(e) => handleEditChange('total', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="0"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-sm font-medium text-gray-700">Items</label>
+                      <button
+                        onClick={addItem}
+                        className="text-blue-500 hover:text-blue-700 text-sm"
+                      >
+                        + Add Item
+                      </button>
+                    </div>
+                    <div className="space-y-2 max-h-40 overflow-y-auto">
+                      {editedData.items.map((item, index) => (
+                        <div key={index} className="flex gap-2">
+                          <input
+                            type="text"
+                            value={item.name}
+                            onChange={(e) => handleItemChange(index, 'name', e.target.value)}
+                            className="flex-1 px-2 py-1 border border-gray-300 rounded-md text-sm"
+                            placeholder="Item name"
+                          />
+                          <input
+                            type="number"
+                            value={item.price}
+                            onChange={(e) => handleItemChange(index, 'price', parseFloat(e.target.value) || 0)}
+                            className="w-24 px-2 py-1 border border-gray-300 rounded-md text-sm"
+                            placeholder="Price"
+                          />
+                          <button
+                            onClick={() => removeItem(index)}
+                            className="text-red-500 hover:text-red-700"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pt-4 border-t">
+                    <p className="text-sm text-gray-600 mb-2">
+                      {editedData.items.length} items • Total: {formatCurrency(parseFloat(editedData.total) || 0)}
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={processReceipt}
+                        className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
+                      >
+                        {editedData.items.length === 1 ? 'Add as Item' : 'Create Cart'}
+                      </button>
+                      <button
+                        onClick={onClose}
+                        className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {ocrResult && (
+          <details className="mt-4">
+            <summary className="cursor-pointer text-sm text-gray-600">View OCR Result</summary>
+            <pre className="mt-2 p-4 bg-gray-100 rounded text-xs overflow-auto max-h-40">
+              {ocrResult}
+            </pre>
+          </details>
+        )}
+      </div>
+    </div>
+  );
+});
 
 // Auth Component
 const AuthComponent = ({ onLogin }) => {
@@ -108,6 +535,7 @@ const AuthComponent = ({ onLogin }) => {
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
               minLength={6}
+              autoComplete="current-password"
             />
           </div>
           
@@ -223,7 +651,7 @@ const CartDetailsModal = React.memo(({ cart, onClose, formatCurrency }) => {
   );
 });
 
-// Move ItemCard outside of FinancialApp
+// ItemCard Component
 const ItemCard = React.memo(({ 
   item, 
   isPrimary = true, 
@@ -263,6 +691,11 @@ const ItemCard = React.memo(({
                 <ShoppingCart size={12} />
                 Cart: {item.cartName}
               </button>
+            )}
+            {item.fromReceipt && (
+              <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
+                Scanned
+              </span>
             )}
           </h3>
           <p className="text-sm text-gray-500">{formatDate(item.date)}</p>
@@ -346,7 +779,7 @@ const ItemCard = React.memo(({
   );
 });
 
-// Move Dashboard outside of FinancialApp
+// Dashboard Component
 const Dashboard = React.memo(({ 
   monthlyBudget, 
   setMonthlyBudget, 
@@ -627,7 +1060,7 @@ const ShoppingCartForm = React.memo(({
   );
 });
 
-// Move ItemBox outside of FinancialApp
+// ItemBox Component
 const ItemBox = React.memo(({ 
   newUnsortedItem, 
   handleNewUnsortedItemChange, 
@@ -653,9 +1086,21 @@ const ItemBox = React.memo(({
   sortCartItem,
   deleteCartItem,
   editCartItem,
-  onCartClick
+  onCartClick,
+  onScanReceipt
 }) => (
   <div className="space-y-6">
+    {/* Scan Receipt Button */}
+    <div className="bg-white rounded-lg shadow-md p-6">
+      <button
+        onClick={onScanReceipt}
+        className="w-full bg-purple-500 text-white px-6 py-3 rounded-lg hover:bg-purple-600 transition-colors flex items-center justify-center gap-2"
+      >
+        <Camera size={20} />
+        Scan Receipt
+      </button>
+    </div>
+
     {/* Add Unsorted Item Form */}
     <div className="bg-white rounded-lg shadow-md p-6">
       <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
@@ -825,6 +1270,11 @@ const ItemBox = React.memo(({
                 <h4 className="font-semibold flex items-center gap-2">
                   <ShoppingCart size={18} />
                   {cart.name}
+                  {cart.fromReceipt && (
+                    <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
+                      Scanned
+                    </span>
+                  )}
                 </h4>
                 <p className="text-sm text-gray-500">{formatDate(cart.date)}</p>
               </div>
@@ -876,6 +1326,7 @@ const ItemBox = React.memo(({
   </div>
 ));
 
+// Main FinancialApp Component
 const FinancialApp = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -898,6 +1349,7 @@ const FinancialApp = () => {
   const [editingCart, setEditingCart] = useState(null);
   const [editingCartItem, setEditingCartItem] = useState(null);
   const [sortingCartItem, setSortingCartItem] = useState(null);
+  const [showReceiptScanner, setShowReceiptScanner] = useState(false);
   const [newItem, setNewItem] = useState({
     name: '',
     categoryMatch: '100',
@@ -1209,6 +1661,62 @@ const FinancialApp = () => {
     }
   }, [newPeriodStart, salaryPeriods, user, monthlyBudget]);
 
+  // Handle receipt scan data
+  const handleReceiptProcess = useCallback(async (receiptData) => {
+    if (!user) return;
+
+    try {
+      if (receiptData.items.length === 1) {
+        // Single item - add to unsorted items
+        const itemData = {
+          userId: user.uid,
+          name: capitalizeFirstLetter(receiptData.items[0].name.trim()),
+          fullPrice: receiptData.items[0].price,
+          date: receiptData.date,
+          categoryMatch: 100,
+          secondaryCategory: '',
+          primaryCategory: '',
+          isRecurring: false,
+          fromReceipt: true,
+          createdAt: new Date().toISOString()
+        };
+        
+        const docRef = await addDoc(collection(db, 'unsortedItems'), itemData);
+        const item = { id: docRef.id, ...itemData };
+        setUnsortedItems(prev => [...prev, item]);
+      } else {
+        // Multiple items - create shopping cart
+        const cartName = receiptData.storeName || `Receipt ${receiptData.date}`;
+        const cartData = {
+          userId: user.uid,
+          name: cartName,
+          totalPrice: parseFloat(receiptData.total),
+          date: receiptData.date,
+          items: receiptData.items.map((item, index) => ({
+            id: `${Date.now()}-${index}`,
+            name: capitalizeFirstLetter(item.name),
+            price: item.price,
+            primaryCategory: '',
+            secondaryCategory: '',
+            categoryMatch: 100
+          })),
+          fromReceipt: true,
+          createdAt: new Date().toISOString()
+        };
+        
+        const docRef = await addDoc(collection(db, 'carts'), cartData);
+        const cart = { id: docRef.id, ...cartData };
+        setCarts(prev => [...prev, cart]);
+      }
+      
+      setShowReceiptScanner(false);
+      alert(receiptData.items.length === 1 ? 'Item added to Item Box!' : 'Shopping cart created!');
+    } catch (error) {
+      console.error('Error processing receipt:', error);
+      alert('Failed to process receipt. Please try again.');
+    }
+  }, [user]);
+
   // Add new item to specific category
   const addItem = useCallback(async () => {
     if (newItem.name.trim() && parseFloat(newItem.fullPrice) > 0 && user) {
@@ -1301,6 +1809,7 @@ const FinancialApp = () => {
         categoryMatch: parseFloat(sortData.categoryMatch),
         secondaryCategory: sortData.secondaryCategory,
         isRecurring: unsortedItem.isRecurring || false,
+        fromReceipt: unsortedItem.fromReceipt || false,
         createdAt: new Date().toISOString()
       };
       
@@ -1418,6 +1927,7 @@ const FinancialApp = () => {
         isRecurring: false,
         cartId: cartId,
         cartName: cart.name,
+        fromReceipt: cart.fromReceipt || false,
         createdAt: new Date().toISOString()
       };
       
@@ -1605,7 +2115,8 @@ const FinancialApp = () => {
       'Primary Split',
       'Secondary Split',
       'Is Recurring',
-      'Cart Name'
+      'Cart Name',
+      'From Receipt'
     ];
     
     // Prepare CSV rows
@@ -1624,7 +2135,8 @@ const FinancialApp = () => {
         primarySplit.toFixed(2),
         secondarySplit.toFixed(2),
         item.isRecurring ? 'Yes' : 'No',
-        item.cartName || ''
+        item.cartName || '',
+        item.fromReceipt ? 'Yes' : 'No'
       ];
     });
     
@@ -1871,40 +2383,37 @@ const FinancialApp = () => {
           deleteCartItem={deleteCartItem}
           editCartItem={editCartItem}
           onCartClick={handleCartClick}
+          onScanReceipt={() => setShowReceiptScanner(true)}
         />
       )}
       
       {activeTab === 'Recurring Spendings' && (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <div className="bg-white rounded-lg shadow-md p-6">
             <h2 className="text-xl font-semibold mb-4">Recurring Monthly Expenses</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              These items are automatically included in your monthly budget calculations.
+            </p>
             <div className="text-center mb-6">
-              <p className="text-sm text-gray-600">Total Monthly Recurring</p>
+              <p className="text-lg font-medium text-gray-700">Total Monthly Recurring</p>
               <p className="text-3xl font-bold text-orange-600">{formatCurrency(getRecurringTotal())}</p>
             </div>
           </div>
           
-          <div className="space-y-4">
-            {getRecurringItems().map(item => (
-              <ItemCard 
-                key={item.id}
-                item={item} 
-                isPrimary={true}
-                onEdit={editItem}
-                onDelete={deleteItem}
-                onCartClick={handleCartClick}
-                calculateSplitPrice={calculateSplitPrice}
-                calculateSecondaryPercentage={calculateSecondaryPercentage}
-                formatCurrency={formatCurrency}
-                formatDate={formatDate}
-              />
-            ))}
-            {getRecurringItems().length === 0 && (
-              <div className="text-center py-8 text-gray-500">
-                No recurring expenses yet
-              </div>
-            )}
-          </div>
+          {getRecurringItems().map(item => (
+            <ItemCard 
+              key={item.id}
+              item={item} 
+              isPrimary={true}
+              onEdit={editItem}
+              onDelete={deleteItem}
+              onCartClick={handleCartClick}
+              calculateSplitPrice={calculateSplitPrice}
+              calculateSecondaryPercentage={calculateSecondaryPercentage}
+              formatCurrency={formatCurrency}
+              formatDate={formatDate}
+            />
+          ))}
         </div>
       )}
       
@@ -2065,6 +2574,54 @@ const FinancialApp = () => {
         </>
       )}
 
+      {/* New Period Modal */}
+      {showNewPeriodModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-lg font-semibold mb-4">Create New Salary Period</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Start Date
+                </label>
+                <input
+                  type="date"
+                  value={newPeriodStart}
+                  onChange={(e) => setNewPeriodStart(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              
+              {salaryPeriods.length > 0 && (
+                <p className="text-sm text-gray-600">
+                  The previous period will automatically end on the day before this date.
+                </p>
+              )}
+            </div>
+            
+            <div className="flex gap-2 mt-6">
+              <button
+                onClick={createSalaryPeriod}
+                disabled={!newPeriodStart}
+                className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-300"
+              >
+                Create Period
+              </button>
+              <button
+                onClick={() => {
+                  setShowNewPeriodModal(false);
+                  setNewPeriodStart(new Date().toISOString().split('T')[0]);
+                }}
+                className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Sort Modal */}
       {sortingItem && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -2130,9 +2687,20 @@ const FinancialApp = () => {
                   primaryCategory: sortingItem.primaryCategory,
                   categoryMatch: sortingItem.categoryMatch || '100',
                   secondaryCategory: sortingItem.secondaryCategory || ''
-                }, true)} // true to auto-move to next
+                })}
                 disabled={!sortingItem.primaryCategory}
                 className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-300"
+              >
+                Sort Item
+              </button>
+              <button
+                onClick={() => sortItem(sortingItem, {
+                  primaryCategory: sortingItem.primaryCategory,
+                  categoryMatch: sortingItem.categoryMatch || '100',
+                  secondaryCategory: sortingItem.secondaryCategory || ''
+                }, true)}
+                disabled={!sortingItem.primaryCategory}
+                className="flex-1 bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 disabled:bg-gray-300"
               >
                 Sort & Next
               </button>
@@ -2147,7 +2715,7 @@ const FinancialApp = () => {
         </div>
       )}
 
-      {/* Sort Cart Item Modal */}
+      {/* Cart Item Sort Modal */}
       {sortingCartItem && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg p-6 w-full max-w-md">
@@ -2160,11 +2728,8 @@ const FinancialApp = () => {
                   Primary Category
                 </label>
                 <select
-                  value={sortingCartItem.item.primaryCategory || ''}
-                  onChange={(e) => setSortingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, primaryCategory: e.target.value }
-                  }))}
+                  value={sortingCartItem.primaryCategory || ''}
+                  onChange={(e) => setSortingCartItem(prev => ({ ...prev, primaryCategory: e.target.value }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="">Select category</option>
@@ -2184,29 +2749,23 @@ const FinancialApp = () => {
                   type="number"
                   min="0"
                   max="100"
-                  value={sortingCartItem.item.categoryMatch || '100'}
-                  onChange={(e) => setSortingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, categoryMatch: e.target.value }
-                  }))}
+                  value={sortingCartItem.categoryMatch || '100'}
+                  onChange={(e) => setSortingCartItem(prev => ({ ...prev, categoryMatch: e.target.value }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
               
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Secondary Category ({calculateSecondaryPercentage(sortingCartItem.item.categoryMatch || '100')}%)
+                  Secondary Category ({calculateSecondaryPercentage(sortingCartItem.categoryMatch || '100')}%)
                 </label>
                 <select
-                  value={sortingCartItem.item.secondaryCategory || ''}
-                  onChange={(e) => setSortingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, secondaryCategory: e.target.value }
-                  }))}
+                  value={sortingCartItem.secondaryCategory || ''}
+                  onChange={(e) => setSortingCartItem(prev => ({ ...prev, secondaryCategory: e.target.value }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="">None</option>
-                  {categories.filter(cat => cat !== sortingCartItem.item.primaryCategory).map(category => (
+                  {categories.filter(cat => cat !== sortingCartItem.primaryCategory).map(category => (
                     <option key={category} value={category}>
                       {category}
                     </option>
@@ -2218,17 +2777,73 @@ const FinancialApp = () => {
             <div className="flex gap-2 mt-6">
               <button
                 onClick={() => saveSortedCartItem(sortingCartItem.cartId, sortingCartItem.item, {
-                  primaryCategory: sortingCartItem.item.primaryCategory,
-                  categoryMatch: sortingCartItem.item.categoryMatch || '100',
-                  secondaryCategory: sortingCartItem.item.secondaryCategory || ''
+                  primaryCategory: sortingCartItem.primaryCategory,
+                  categoryMatch: sortingCartItem.categoryMatch || '100',
+                  secondaryCategory: sortingCartItem.secondaryCategory || ''
                 })}
-                disabled={!sortingCartItem.item.primaryCategory}
+                disabled={!sortingCartItem.primaryCategory}
                 className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-300"
               >
                 Sort Item
               </button>
               <button
                 onClick={() => setSortingCartItem(null)}
+                className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cart Item Edit Modal */}
+      {editingCartItem && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-lg font-semibold mb-4">Edit Cart Item</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Item Name
+                </label>
+                <input
+                  type="text"
+                  value={editingCartItem.item.name}
+                  onChange={(e) => setEditingCartItem(prev => ({ 
+                    ...prev, 
+                    item: { ...prev.item, name: e.target.value }
+                  }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Price (HUF)
+                </label>
+                <input
+                  type="number"
+                  value={editingCartItem.item.price}
+                  onChange={(e) => setEditingCartItem(prev => ({ 
+                    ...prev, 
+                    item: { ...prev.item, price: e.target.value }
+                  }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            
+            <div className="flex gap-2 mt-6">
+              <button
+                onClick={() => saveEditedCartItem(editingCartItem.cartId, editingCartItem.item)}
+                className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
+              >
+                Save
+              </button>
+              <button
+                onClick={() => setEditingCartItem(null)}
                 className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
               >
                 Cancel
@@ -2344,39 +2959,45 @@ const FinancialApp = () => {
         </div>
       )}
 
-      {/* Edit Cart Item Modal */}
-      {editingCartItem && (
+      {/* Edit Cart Modal */}
+      {editingCart && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold mb-4">Edit Cart Item</h3>
+            <h3 className="text-lg font-semibold mb-4">Edit Shopping Cart</h3>
             
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Item Name
+                  Cart Name
                 </label>
                 <input
                   type="text"
-                  value={editingCartItem.item.name}
-                  onChange={(e) => setEditingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, name: e.target.value }
-                  }))}
+                  value={editingCart.name}
+                  onChange={(e) => setEditingCart(prev => ({ ...prev, name: e.target.value }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
               
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Price (HUF)
+                  Total Price (HUF)
                 </label>
                 <input
                   type="number"
-                  value={editingCartItem.item.price}
-                  onChange={(e) => setEditingCartItem(prev => ({
-                    ...prev,
-                    item: { ...prev.item, price: e.target.value }
-                  }))}
+                  value={editingCart.totalPrice}
+                  onChange={(e) => setEditingCart(prev => ({ ...prev, totalPrice: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Date
+                </label>
+                <input
+                  type="date"
+                  value={editingCart.date}
+                  onChange={(e) => setEditingCart(prev => ({ ...prev, date: e.target.value }))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -2384,13 +3005,27 @@ const FinancialApp = () => {
             
             <div className="flex gap-2 mt-6">
               <button
-                onClick={() => saveEditedCartItem(editingCartItem.cartId, editingCartItem.item)}
+                onClick={async () => {
+                  try {
+                    await updateDoc(doc(db, 'carts', editingCart.id), {
+                      name: editingCart.name,
+                      totalPrice: parseFloat(editingCart.totalPrice),
+                      date: editingCart.date,
+                      updatedAt: new Date().toISOString()
+                    });
+                    setCarts(prev => prev.map(c => c.id === editingCart.id ? { ...editingCart, totalPrice: parseFloat(editingCart.totalPrice) } : c));
+                    setEditingCart(null);
+                  } catch (error) {
+                    console.error('Error updating cart:', error);
+                    alert('Failed to update cart. Please try again.');
+                  }
+                }}
                 className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
               >
                 Save
               </button>
               <button
-                onClick={() => setEditingCartItem(null)}
+                onClick={() => setEditingCart(null)}
                 className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
               >
                 Cancel
@@ -2400,55 +3035,13 @@ const FinancialApp = () => {
         </div>
       )}
 
-      {/* New Period Modal */}
-      {showNewPeriodModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold mb-4">Create New Salary Period</h3>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Period Start Date
-                </label>
-                <input
-                  type="date"
-                  value={newPeriodStart}
-                  onChange={(e) => setNewPeriodStart(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  The end date will be automatically set when you create the next period
-                </p>
-              </div>
-              
-              {salaryPeriods.length > 0 && (
-                <div className="bg-blue-50 p-3 rounded text-sm text-blue-700">
-                  <p className="font-medium mb-1">Note:</p>
-                  <p>Creating this period will automatically set the end date for the most recent period to the day before this start date.</p>
-                </div>
-              )}
-            </div>
-            
-            <div className="flex gap-2 mt-6">
-              <button
-                onClick={createSalaryPeriod}
-                className="flex-1 bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600"
-              >
-                Create Period
-              </button>
-              <button
-                onClick={() => {
-                  setShowNewPeriodModal(false);
-                  setNewPeriodStart(new Date().toISOString().split('T')[0]);
-                }}
-                className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Receipt Scanner Modal */}
+      {showReceiptScanner && (
+        <ReceiptScanner
+          onClose={() => setShowReceiptScanner(false)}
+          onProcessReceipt={handleReceiptProcess}
+          formatCurrency={formatCurrency}
+        />
       )}
 
       {/* Cart Details Modal */}
@@ -2463,9 +3056,4 @@ const FinancialApp = () => {
   );
 };
 
-// Main App Component with Auth
-const App = () => {
-  return <FinancialApp />;
-};
-
-export default App;
+export default FinancialApp
